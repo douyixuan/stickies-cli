@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""stk - a wrapper around macOS Stickies for humans and agents.
+
+Source of truth for tasks is a JSON file (STK_TASKS). Stickies is a view:
+this tool reads its files directly (no UI automation) and only rewrites
+window geometry while Stickies is quit (tile --apply, with a backup).
+"""
+import argparse, fcntl, json, os, plistlib, re, shutil, subprocess, sys, time
+from pathlib import Path
+
+HOME = Path.home()
+SDIR = HOME / "Library/Containers/com.apple.Stickies/Data/Library/Stickies"
+STATE = SDIR / ".SavedStickiesState"
+TASKS = Path(os.environ.get("STK_TASKS", HOME / ".stk/tasks.json"))
+BACKUPS = HOME / ".stk/backups"
+
+
+def sh(*a, check=True):
+    return subprocess.run(a, capture_output=True, text=True, check=check).stdout
+
+
+def text_of(uuid):
+    p = SDIR / f"{uuid}.rtfd"
+    f = p / "TXT.rtf"
+    if not f.exists():
+        return ""
+    return sh("textutil", "-convert", "txt", "-stdout", str(f), check=False)
+
+
+def parse_frame(s):
+    n = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", s)]
+    return n if len(n) == 4 else [0, 0, 300, 200]
+
+
+def stickies():
+    state = plistlib.load(open(STATE, "rb")) if STATE.exists() else []
+    by = {s["UUID"]: s for s in state}
+    links = {t["sticky"]: t["id"] for t in load_tasks() if t.get("sticky")}
+    out = []
+    for p in SDIR.glob("*.rtfd"):
+        u = p.stem
+        txt = text_of(u)
+        lines = [l for l in txt.splitlines() if l.strip()]
+        st = by.get(u, {})
+        out.append({
+            "uuid": u, "title": lines[0] if lines else "(empty)", "text": txt,
+            "mtime": int((p / "TXT.rtf").stat().st_mtime) if (p / "TXT.rtf").exists() else 0,
+            "frame": parse_frame(st.get("Frame", "")), "floating": bool(st.get("Floating")),
+            "z": st.get("ZOrder", 0), "task": links.get(u),
+        })
+    return out
+
+
+def pick(q):
+    allv = stickies()
+    m = [s for s in allv if s["uuid"].lower().startswith(q.lower())]
+    if not m:
+        m = [s for s in allv if q.lower() in s["text"].lower()]
+    if len(m) != 1:
+        sys.exit(f"{len(m)} stickies match {q!r}; be more specific" if m else f"no sticky matches {q!r}")
+    return m[0]
+
+
+# ---- tasks (source of truth) -------------------------------------------------
+def load_tasks():
+    return json.load(open(TASKS)) if TASKS.exists() else []
+
+
+class locked:
+    def __enter__(self):
+        TASKS.parent.mkdir(parents=True, exist_ok=True)
+        self.f = open(TASKS.with_suffix(".lock"), "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return load_tasks()
+
+    def save(self, tasks):
+        tmp = TASKS.with_suffix(".tmp")
+        json.dump(tasks, open(tmp, "w"), ensure_ascii=False, indent=1)
+        os.replace(tmp, TASKS)
+
+    def __exit__(self, *a):
+        self.f.close()
+
+
+def find_task(tasks, tid):
+    m = [t for t in tasks if t["id"] == tid or t["id"].startswith(tid)]
+    if len(m) != 1:
+        sys.exit(f"task {tid!r}: {len(m)} matches")
+    return m[0]
+
+
+def cmd_add(a):
+    lk = locked()
+    with lk as tasks:
+        n = max([int(t["id"][1:]) for t in tasks] + [0]) + 1
+        t = {"id": f"T{n}", "title": a.title, "status": "todo", "project": a.project or "",
+             "next": a.next or "", "links": a.link or [], "sticky": None, "updated": int(time.time())}
+        tasks.append(t)
+        lk.save(tasks)
+    print(t["id"])
+
+
+def cmd_set(a):
+    lk = locked()
+    with lk as tasks:
+        t = find_task(tasks, a.id)
+        for kv in a.kv:
+            k, _, v = kv.partition("=")
+            if k not in ("title", "status", "project", "next", "sticky"):
+                sys.exit(f"unknown field {k}")
+            t[k] = v or None if k == "sticky" else v
+        t["updated"] = int(time.time())
+        lk.save(tasks)
+    print(json.dumps(t, ensure_ascii=False))
+
+
+def cmd_done(a):
+    a.kv = ["status=done"]
+    cmd_set(a)
+
+
+def cmd_link(a):
+    s = pick(a.sticky)
+    a.kv = [f"sticky={s['uuid']}"]
+    cmd_set(a)
+
+
+def cmd_tasks(a):
+    ts = [t for t in load_tasks() if a.all or t["status"] != "done"]
+    if a.json:
+        return print(json.dumps(ts, ensure_ascii=False, indent=1))
+    for t in ts:
+        print(f"{t['id']:<5}{t['status']:<8}{t['project']:<14}{t['title']}  -> {t['next']}")
+
+
+# ---- stickies (read-only view) -----------------------------------------------
+def cmd_ls(a):
+    v = sorted(stickies(), key=lambda s: -s["mtime"])
+    if a.json:
+        return print(json.dumps([{k: x[k] for k in x if k != "text"} for x in v], ensure_ascii=False, indent=1))
+    for s in v:
+        age = time.strftime("%m-%d %H:%M", time.localtime(s["mtime"]))
+        print(f"{s['uuid'][:8]}  {age}  {s['task'] or '-':<5} {s['title'][:70]}")
+
+
+def cmd_show(a):
+    s = pick(a.q)
+    print(s["text"] if not a.json else json.dumps(s, ensure_ascii=False, indent=1))
+
+
+def cmd_find(a):
+    for s in stickies():
+        if a.q.lower() in s["text"].lower():
+            print(f"{s['uuid'][:8]}  {s['title'][:70]}")
+
+
+def cmd_open(a):
+    sh("open", "-a", "Stickies")
+
+
+# ---- tiling (offline: edits geometry while Stickies is quit) -----------------
+def screens():
+    js = 'ObjC.import("AppKit");JSON.stringify($.NSScreen.screens.js.map(s=>{const f=s.visibleFrame;return [f.origin.x,f.origin.y,f.size.width,f.size.height]}))'
+    return json.loads(sh("osascript", "-l", "JavaScript", "-e", js).strip().splitlines()[-1])
+
+
+def cmd_tile(a):
+    scr = screens()
+    x0, y0, W, H = scr[a.screen]
+    state = plistlib.load(open(STATE, "rb"))
+    order = {s["uuid"]: s for s in stickies()}
+    key = {"mtime": lambda s: -s["mtime"], "title": lambda s: s["title"], "z": lambda s: s["z"]}[a.sort]
+    items = sorted((order[s["UUID"]] for s in state if s["UUID"] in order), key=key)
+    w, h, g = a.width, a.height, a.gap
+    cols = a.cols or max(1, int((W - g) // (w + g)))
+    plan = {}
+    for i, s in enumerate(items):
+        c, r = i % cols, i // cols
+        x = x0 + g + c * (w + g)
+        y = y0 + H - a.top - g - (r + 1) * h - r * g   # Cocoa origin is bottom-left
+        plan[s["uuid"]] = f"{{{{{x:.0f}, {y:.0f}}}, {{{w}, {h}}}}}"
+        print(f"{s['uuid'][:8]} r{r}c{c} {plan[s['uuid']]}  {s['title'][:40]}")
+    if y < y0:
+        print("WARNING: rows overflow the screen; raise --cols or lower --height", file=sys.stderr)
+    if not a.apply:
+        return print("(dry run; add --apply to quit Stickies, rewrite geometry, relaunch)")
+    BACKUPS.mkdir(parents=True, exist_ok=True)
+    bk = BACKUPS / f"SavedStickiesState.{int(time.time())}"
+    shutil.copy2(STATE, bk)
+    subprocess.run(["osascript", "-e", 'tell application "Stickies" to quit'], check=False)
+    for _ in range(50):
+        if subprocess.run(["pgrep", "-x", "Stickies"], capture_output=True).returncode:
+            break
+        time.sleep(0.2)
+    else:
+        sys.exit("Stickies did not quit; nothing changed")
+    state = plistlib.load(open(STATE, "rb"))   # re-read: Stickies rewrites it on quit
+    for s in state:
+        if s["UUID"] in plan:
+            s["Frame"] = plan[s["UUID"]]
+            s["ExpandedSize"] = f"{{{w}, {h}}}"
+    plistlib.dump(state, open(STATE, "wb"), fmt=plistlib.FMT_BINARY)
+    sh("open", "-a", "Stickies")
+    print(f"done; backup: {bk}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="stk", description=__doc__)
+    sp = p.add_subparsers(dest="cmd", required=True)
+
+    def add(name, fn, *args, **kw):
+        q = sp.add_parser(name, help=kw.get("help"))
+        for ar, ak in args:
+            q.add_argument(*ar if isinstance(ar, tuple) else (ar,), **ak)
+        q.set_defaults(fn=fn)
+
+    J = (("--json",), {"action": "store_true"})
+    add("ls", cmd_ls, J, help="list all stickies")
+    add("show", cmd_show, ("q", {}), J, help="print one sticky (uuid prefix or text match)")
+    add("find", cmd_find, ("q", {}), help="search sticky text")
+    add("open", cmd_open, help="bring Stickies (all notes) to front")
+    add("tasks", cmd_tasks, (("--all",), {"action": "store_true"}), J, help="list tasks")
+    add("add", cmd_add, ("title", {}), (("--project",), {}), (("--next",), {}), (("--link",), {"action": "append"}), help="add task")
+    add("set", cmd_set, ("id", {}), ("kv", {"nargs": "+"}), help="set fields: status=doing next=...")
+    add("done", cmd_done, ("id", {}), help="mark done")
+    add("link", cmd_link, ("id", {}), ("sticky", {}), help="link task to a sticky")
+    add("tile", cmd_tile, (("--screen",), {"type": int, "default": 0}), (("--cols",), {"type": int}),
+        (("--width",), {"type": int, "default": 300}), (("--height",), {"type": int, "default": 200}),
+        (("--gap",), {"type": int, "default": 8}), (("--top",), {"type": int, "default": 32}), (("--sort",), {"default": "mtime", "choices": ["mtime", "title", "z"]}),
+        (("--apply",), {"action": "store_true"}), help="grid-arrange stickies on one screen")
+    a = p.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()
