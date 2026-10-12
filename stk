@@ -48,11 +48,41 @@ def stickies():
             "frame": parse_frame(st.get("Frame", "")), "floating": bool(st.get("Floating")),
             "z": st.get("ZOrder", 0), "task": links.get(u),
         })
+    return number(out)
+
+
+def number(notes):
+    """Sort notes in reading order (top row first, left to right) and set n = 1, 2, ..."""
+    rows = []
+    for s in sorted(notes, key=lambda s: -(s["frame"][1] + s["frame"][3])):
+        top = s["frame"][1] + s["frame"][3]
+        if rows and abs(rows[-1][0] - top) < s["frame"][3] / 2:
+            rows[-1][1].append(s)
+        else:
+            rows.append((top, [s]))
+    out = [s for _, r in rows for s in sorted(r, key=lambda s: s["frame"][0])]
+    for i, s in enumerate(out, 1):
+        s["n"] = i
     return out
+
+
+def draw(count, cols, cw=4):
+    """Print tiles 1..count as a grid of numbers."""
+    line = lambda k: print("+" + "+".join("-" * cw for _ in range(k)) + "+")
+    for r in range(0, count, cols):
+        row = range(r + 1, min(r + cols, count) + 1)
+        line(cols if r else len(row))
+        print("|" + "|".join(f"{n:^{cw}}" for n in row) + "|")
+    if count:
+        line(count % cols or cols)
 
 
 def pick(q):
     allv = stickies()
+    if q.isdigit():
+        m = [s for s in allv if s["n"] == int(q)]
+        if m:
+            return m[0]
     m = [s for s in allv if s["uuid"].lower().startswith(q.lower())]
     if not m:
         m = [s for s in allv if q.lower() in s["text"].lower()]
@@ -135,12 +165,12 @@ def cmd_tasks(a):
 
 # ---- stickies (read-only view) -----------------------------------------------
 def cmd_ls(a):
-    v = sorted(stickies(), key=lambda s: -s["mtime"])
+    v = stickies()
     if a.json:
         return print(json.dumps([{k: x[k] for k in x if k != "text"} for x in v], ensure_ascii=False, indent=1))
     for s in v:
         age = time.strftime("%m-%d %H:%M", time.localtime(s["mtime"]))
-        print(f"{s['uuid'][:8]}  {age}  {s['task'] or '-':<5} {s['title'][:70]}")
+        print(f"{s['n']:>2}  {age}  {s['title'][:70]}")
 
 
 def cmd_show(a):
@@ -151,7 +181,7 @@ def cmd_show(a):
 def cmd_find(a):
     for s in stickies():
         if a.q.lower() in s["text"].lower():
-            print(f"{s['uuid'][:8]}  {s['title'][:70]}")
+            print(f"{s['n']:>2}  {s['title'][:70]}")
 
 
 def cmd_open(a):
@@ -160,28 +190,60 @@ def cmd_open(a):
 
 # ---- tiling (offline: edits geometry while Stickies is quit) -----------------
 def screens():
-    js = 'ObjC.import("AppKit");JSON.stringify($.NSScreen.screens.js.map(s=>{const f=s.visibleFrame;return [f.origin.x,f.origin.y,f.size.width,f.size.height]}))'
-    return json.loads(sh("osascript", "-l", "JavaScript", "-e", js).strip().splitlines()[-1])
+    """Usable area of each screen as [x, y, width, height], with the origin at the bottom left."""
+    js = ('ObjC.import("AppKit");JSON.stringify($.NSScreen.screens.js.map(s=>{'
+          'const f=s.visibleFrame,g=s.frame;return [f.origin.x,f.origin.y,f.size.width,f.size.height,g.origin.y+g.size.height]}))')
+    d = json.loads(sh("osascript", "-l", "JavaScript", "-e", js).strip().splitlines()[-1])
+    # visibleFrame leaves out the menu bar only on the main screen. When each screen has its own
+    # menu bar, the system pushes notes down from under it, so leave the same space on all screens.
+    spans = sh("defaults", "read", "com.apple.spaces", "spans-displays", check=False).strip() == "1"
+    bar = 0 if spans else d[0][4] - (d[0][1] + d[0][3])
+    return [[x, y, w, min(h, top - bar - y)] for x, y, w, h, top in d]
+
+
+MIN_W, MIN_H = 120, 60   # below this a note is not readable
+
+
+def fit(n, W, H, w, h, g, cols=None):
+    """Return (cols, w, h) for a grid that keeps n tiles inside W x H. Tiles shrink when they do not fit."""
+    best = None
+    for c in ([cols] if cols else range(1, n + 1)):
+        r = -(-n // c)
+        fw, fh = min(w, (W - g * (c + 1)) // c), min(h, (H - g * (r + 1)) // r)
+        score = min(fw / w, fh / h)
+        if best is None or score >= best[0]:   # on a tie, prefer more columns (fewer rows)
+            best = (score, c, int(fw), int(fh))
+    return best[1:]
 
 
 def cmd_tile(a):
     scr = screens()
+    if not 0 <= a.screen < len(scr):
+        sys.exit(f"no screen {a.screen}; there are {len(scr)} (0..{len(scr) - 1})")
     x0, y0, W, H = scr[a.screen]
     state = plistlib.load(open(STATE, "rb"))
     order = {s["uuid"]: s for s in stickies()}
-    key = {"mtime": lambda s: -s["mtime"], "title": lambda s: s["title"], "z": lambda s: s["z"]}[a.sort]
+    key = {"pos": lambda s: s["n"], "mtime": lambda s: -s["mtime"], "title": lambda s: s["title"], "z": lambda s: s["z"]}[a.sort]
     items = sorted((order[s["UUID"]] for s in state if s["UUID"] in order), key=key)
-    w, h, g = a.width, a.height, a.gap
-    cols = a.cols or max(1, int((W - g) // (w + g)))
+    g = a.gap
+    if not items:
+        return print("no notes")
+    cols, w, h = fit(len(items), W, H - a.top, a.width, a.height, g, a.cols)
+    if w < MIN_W or h < MIN_H:
+        sys.exit(f"{len(items)} notes do not fit on screen {a.screen} ({W:.0f}x{H:.0f})"
+                 + ("; raise --cols" if a.cols else "; use a larger screen or delete notes"))
+    if (w, h) != (a.width, a.height):
+        print(f"notes are {w}x{h} (not {a.width}x{a.height}) so that all {len(items)} fit on screen {a.screen}")
     plan = {}
     for i, s in enumerate(items):
         c, r = i % cols, i // cols
         x = x0 + g + c * (w + g)
         y = y0 + H - a.top - g - (r + 1) * h - r * g   # Cocoa origin is bottom-left
         plan[s["uuid"]] = f"{{{{{x:.0f}, {y:.0f}}}, {{{w}, {h}}}}}"
-        print(f"{s['uuid'][:8]} r{r}c{c} {plan[s['uuid']]}  {s['title'][:40]}")
-    if y < y0:
-        print("WARNING: rows overflow the screen; raise --cols or lower --height", file=sys.stderr)
+        if a.coords:
+            print(f"{i + 1:>2} {plan[s['uuid']]}  {s['title'][:40]}")
+    if not a.coords:
+        draw(len(items), cols)
     if not a.apply:
         return print("(dry run; add --apply to quit Stickies, rewrite geometry, relaunch)")
     BACKUPS.mkdir(parents=True, exist_ok=True)
@@ -200,7 +262,13 @@ def cmd_tile(a):
             s["Frame"] = plan[s["UUID"]]
             s["ExpandedSize"] = f"{{{w}, {h}}}"
     plistlib.dump(state, open(STATE, "wb"), fmt=plistlib.FMT_BINARY)
-    sh("open", "-a", "Stickies")
+    # The system can refuse to start an app that has only just quit; try again.
+    for _ in range(10):
+        time.sleep(0.5)
+        if subprocess.run(["open", "-a", "Stickies"], capture_output=True).returncode == 0:
+            break
+    else:
+        sys.exit(f"positions are saved, but Stickies did not start; run: open -a Stickies (backup: {bk})")
     print(f"done; backup: {bk}")
 
 
@@ -226,7 +294,8 @@ def main():
     add("link", cmd_link, ("id", {}), ("sticky", {}), help="link task to a sticky")
     add("tile", cmd_tile, (("--screen",), {"type": int, "default": 0}), (("--cols",), {"type": int}),
         (("--width",), {"type": int, "default": 300}), (("--height",), {"type": int, "default": 200}),
-        (("--gap",), {"type": int, "default": 8}), (("--top",), {"type": int, "default": 32}), (("--sort",), {"default": "mtime", "choices": ["mtime", "title", "z"]}),
+        (("--gap",), {"type": int, "default": 8}), (("--top",), {"type": int, "default": 0}), (("--sort",), {"default": "pos", "choices": ["pos", "mtime", "title", "z"]}),
+        (("--coords",), {"action": "store_true"}),
         (("--apply",), {"action": "store_true"}), help="grid-arrange stickies on one screen")
     a = p.parse_args()
     a.fn(a)

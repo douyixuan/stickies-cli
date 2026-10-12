@@ -22,17 +22,17 @@ ln -s "$PWD/stickies-cli/stk" /usr/local/bin/stk
 
 | Command | Function |
 | --- | --- |
-| `stk ls [--json]` | List all notes, newest first. |
+| `stk ls [--json]` | List all notes with their numbers. |
 | `stk show <id-or-text>` | Print the full text of one note. |
 | `stk find <text>` | Search the text of all notes. |
 | `stk open` | Bring Stickies and all its notes to the front. |
 | `stk tile [options]` | Arrange all notes in a grid on one screen. |
 
-`<id>` is a prefix of the note UUID that `stk ls` shows.
+`<id>` is the number that `stk ls` shows. The numbers follow the position of the notes on the screen: the top row first, then left to right. Stickies saves positions only when it quits, so the numbers can be out of date after you move a note by hand.
 
 ### Arrange notes
 
-`stk tile` prints the planned positions and changes nothing:
+`stk tile` prints a preview of the numbered grid and changes nothing. Add `--coords` to print the coordinates instead:
 
 ```bash
 stk tile --screen 1 --cols 4
@@ -50,10 +50,12 @@ stk tile --screen 1 --cols 4 --apply
 | --- | --- | --- |
 | `--screen N` | `0` | Index of the display. |
 | `--cols N` | automatic | Number of columns. |
-| `--width`, `--height` | `300`, `200` | Size of each note. |
+| `--width`, `--height` | `300`, `200` | Largest size of each note. |
 | `--gap` | `8` | Space between notes. |
-| `--top` | `32` | Space at the top of the screen for the menu bar. |
-| `--sort` | `mtime` | Order: `mtime`, `title`, or `z`. |
+| `--top` | `0` | More space at the top of the screen. `stk` already leaves space for the menu bar. |
+| `--sort` | `pos` | Order: `pos` (keep the current order), `mtime`, `title`, or `z`. |
+
+All notes stay on the screen that you select. If the notes do not fit at the given size, `stk tile` makes them smaller and prints the new size. If you do not give `--cols`, `stk tile` selects the number of columns that keeps the notes largest. If the notes cannot fit at a readable size, `stk tile` stops and changes nothing.
 
 ### Restore positions
 
