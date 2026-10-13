@@ -272,6 +272,15 @@ def cmd_tile(a):
     print(f"done; backup: {bk}")
 
 
+def cmd_create(a):
+    from background_note import create
+    try:
+        result = create(a.store, a.title, a.body, a.url, a.label, a.apply)
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
+        sys.exit(str(error))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def main():
     p = argparse.ArgumentParser(prog="stk", description=__doc__)
     sp = p.add_subparsers(dest="cmd", required=True)
@@ -282,6 +291,10 @@ def main():
             q.add_argument(*ar if isinstance(ar, tuple) else (ar,), **ak)
         q.set_defaults(fn=fn)
 
+    add("create", cmd_create, ("title", {}), (("--body",), {"default": ""}),
+        (("--url",), {"required": True}), (("--label",), {"default": "返回任务"}),
+        (("--store",), {"default": str(SDIR)}), (("--apply",), {"action": "store_true"}),
+        help="experimental offline rich-text creation; dry run unless --apply; never restarts Stickies")
     J = (("--json",), {"action": "store_true"})
     add("ls", cmd_ls, J, help="list all stickies")
     add("show", cmd_show, ("q", {}), J, help="print one sticky (uuid prefix or text match)")
