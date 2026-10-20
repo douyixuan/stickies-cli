@@ -54,7 +54,7 @@ stk tile --screen 1 --cols 4 --apply
 | `--width`, `--height` | `300`, `200` | Largest size of each note. |
 | `--gap` | `8` | Space between notes. |
 | `--top` | `0` | More space at the top of the screen. `stk` already leaves space for the menu bar. |
-| `--sort` | `pos` | Order: `pos` (keep the current order), `mtime`, `title`, or `z`. |
+| `--sort` | `pos` | Order: `pos` (keep the current order), `project` (put notes of the same project together), `mtime`, `title`, or `z`. The project is the text before the first `｜`, `|`, or `/` in the title. |
 
 All notes stay on the screen that you select. If the notes do not fit at the given size, `stk tile` makes them smaller and prints the new size. If you do not give `--cols`, `stk tile` selects the number of columns that keeps the notes largest. If the notes cannot fit at a readable size, `stk tile` stops and changes nothing.
 

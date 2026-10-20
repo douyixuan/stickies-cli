@@ -216,6 +216,12 @@ def fit(n, W, H, w, h, g, cols=None):
     return best[1:]
 
 
+def project(title):
+    """Project name of a note: the text before the first ｜, |, or / in the title. Empty notes sort last."""
+    head = re.split(r"\s*[｜|/]\s*", title.strip().lstrip("？?!！*-·• "), maxsplit=1)[0]
+    return head.strip() if title != "(empty)" and head.strip() else "\uffff"
+
+
 def cmd_tile(a):
     scr = screens()
     if not 0 <= a.screen < len(scr):
@@ -223,7 +229,8 @@ def cmd_tile(a):
     x0, y0, W, H = scr[a.screen]
     state = plistlib.load(open(STATE, "rb"))
     order = {s["uuid"]: s for s in stickies()}
-    key = {"pos": lambda s: s["n"], "mtime": lambda s: -s["mtime"], "title": lambda s: s["title"], "z": lambda s: s["z"]}[a.sort]
+    key = {"pos": lambda s: s["n"], "mtime": lambda s: -s["mtime"], "title": lambda s: s["title"], "z": lambda s: s["z"],
+           "project": lambda s: (project(s["title"]).casefold(), s["n"])}[a.sort]
     items = sorted((order[s["UUID"]] for s in state if s["UUID"] in order), key=key)
     g = a.gap
     if not items:
@@ -244,6 +251,13 @@ def cmd_tile(a):
             print(f"{i + 1:>2} {plan[s['uuid']]}  {s['title'][:40]}")
     if not a.coords:
         draw(len(items), cols)
+        if a.sort == "project":
+            groups = {}
+            for i, s in enumerate(items, 1):
+                groups.setdefault(project(s["title"]), []).append(i)
+            for name, nums in groups.items():
+                span = str(nums[0]) if len(nums) == 1 else f"{nums[0]}-{nums[-1]}"
+                print(f"{span:>7}  {'(empty)' if name == chr(0xffff) else name}")
     if not a.apply:
         return print("(dry run; add --apply to quit Stickies, rewrite geometry, relaunch)")
     BACKUPS.mkdir(parents=True, exist_ok=True)
@@ -307,7 +321,7 @@ def main():
     add("link", cmd_link, ("id", {}), ("sticky", {}), help="link task to a sticky")
     add("tile", cmd_tile, (("--screen",), {"type": int, "default": 0}), (("--cols",), {"type": int}),
         (("--width",), {"type": int, "default": 300}), (("--height",), {"type": int, "default": 200}),
-        (("--gap",), {"type": int, "default": 8}), (("--top",), {"type": int, "default": 0}), (("--sort",), {"default": "pos", "choices": ["pos", "mtime", "title", "z"]}),
+        (("--gap",), {"type": int, "default": 8}), (("--top",), {"type": int, "default": 0}), (("--sort",), {"default": "pos", "choices": ["pos", "project", "mtime", "title", "z"]}),
         (("--coords",), {"action": "store_true"}),
         (("--apply",), {"action": "store_true"}), help="grid-arrange stickies on one screen")
     a = p.parse_args()
